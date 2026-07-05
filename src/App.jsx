@@ -38,6 +38,29 @@ const INITIAL_SHOP = [
   { id: 3, title: 'Покупка новой книги', price: 800 },
 ];
 
+// --- НОВАЯ ЛОГИКА ВРЕМЕНИ (UTC+5 Екатеринбург) ---
+const EKB_OFFSET_MS = 5 * 60 * 60 * 1000; // 5 часов в миллисекундах
+
+// Получить текущую дату в ЕКБ в формате YYYY-MM-DD
+const getEkbDateString = (offsetMs = 0) => {
+  // Date.now() - абсолютное время. Прибавляем 5 часов и любое доп. смещение.
+  const date = new Date(Date.now() + EKB_OFFSET_MS + offsetMs);
+  return date.toISOString().slice(0, 10); 
+};
+
+// Получить точное время в UTC, когда наступит следующая полночь в Екатеринбурге
+const getNextEkbMidnightMs = () => {
+  const currentUtcMs = Date.now();
+  const currentEkbMs = currentUtcMs + EKB_OFFSET_MS;
+  const msInDay = 86400000;
+  // Сколько миллисекунд прошло с начала текущего дня по ЕКБ
+  const msSinceMidnight = currentEkbMs % msInDay;
+  // Сколько миллисекунд осталось до следующей полуночи
+  const msUntilMidnight = msInDay - msSinceMidnight;
+  return currentUtcMs + msUntilMidnight;
+};
+// ------------------------------------------------
+
 // Безопасная загрузка данных с миграцией старых сохранений
 const loadFromStorage = (key, fallback) => {
   try {
@@ -49,7 +72,7 @@ const loadFromStorage = (key, fallback) => {
       return {
         ...parsed,
         xp: parsed.xp !== undefined ? parsed.xp : parsed.totalEarned || 250,
-        streak: parsed.streak || { count: 1, lastDate: new Date().toISOString().slice(0, 10) },
+        streak: parsed.streak || { count: 1, lastDate: getEkbDateString() }, // Изменено на время ЕКБ
         unlockedAchievements: parsed.unlockedAchievements || [],
         stats: {
           completedTasks: parsed.stats?.completedTasks || 0,
@@ -101,7 +124,7 @@ export default function QuestTrackerApp() {
   
   const [user, setUser] = useState(() => loadFromStorage('quest_user', {
     name: 'Искатель Приключений', avatar: null, balance: 250, xp: 250, totalEarned: 250,
-    streak: { count: 1, lastDate: new Date().toISOString().slice(0, 10) },
+    streak: { count: 1, lastDate: getEkbDateString() }, // Изменено на время ЕКБ
     unlockedAchievements: [],
     stats: { completedTasks: 0, expiredTasks: 0, totalSpent: 0, epicCompleted: 0, onTimeCompleted: 0 }
   }));
@@ -180,10 +203,17 @@ export default function QuestTrackerApp() {
     const newXP = user.xp + xpReward;
     const newLevel = calculateLevelInfo(newXP).level;
 
-    const today = new Date().toISOString().slice(0, 10);
-    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    // ВЫЧИСЛЕНИЕ СТРИКА ПО ВРЕМЕНИ ЕКБ
+    const today = getEkbDateString();
+    const yesterday = getEkbDateString(-86400000); // Отнимаем 24 часа (в миллисекундах)
+    
     let newStreakCount = user.streak.count;
-    if (user.streak.lastDate === yesterday || user.streak.count === 0) newStreakCount += 1;
+    if (user.streak.lastDate === yesterday || user.streak.count === 0) {
+      newStreakCount += 1;
+    } else if (user.streak.lastDate !== today) {
+      // Если последний раз был не сегодня и не вчера — стрик сбрасывается
+      newStreakCount = 1;
+    }
 
     const newStats = {
       completedTasks: user.stats.completedTasks + 1,
@@ -217,10 +247,13 @@ export default function QuestTrackerApp() {
     // Проверка ачивок
     setTimeout(() => checkAchievements(updatedUser, newLevel), 100);
 
-    // Обработка циклов/повторов
+    // УМНЫЙ СБРОС ЦИКЛИЧЕСКИХ КВЕСТОВ В 00:00 ПО ЕКБ
     if (task.type === 'daily' || task.type === 'weekly') {
-      const cooldownMs = task.type === 'daily' ? 86400000 : 604800000;
-      setTasks(prev => prev.map(t => t.id === task.id ? { ...t, cooldownUntil: Date.now() + cooldownMs } : t));
+      const midnightEkbMs = getNextEkbMidnightMs();
+      // Для еженедельных квестов добавляем еще 6 дней к ближайшей полуночи
+      const cooldownMs = task.type === 'daily' ? midnightEkbMs : midnightEkbMs + (6 * 86400000);
+      
+      setTasks(prev => prev.map(t => t.id === task.id ? { ...t, cooldownUntil: cooldownMs } : t));
     } else if (task.recurrence !== 'none') {
       const intervals = { daily: 86400000, weekly: 604800000, monthly: 2592000000 };
       const nextDeadline = task.deadline ? new Date(Date.now() + intervals[task.recurrence]).toISOString().slice(0, 16) : null;
@@ -285,7 +318,7 @@ export default function QuestTrackerApp() {
       localStorage.clear();
       setUser({
         name: 'Искатель Приключений', avatar: null, balance: 250, xp: 250, totalEarned: 250,
-        streak: { count: 1, lastDate: new Date().toISOString().slice(0, 10) },
+        streak: { count: 1, lastDate: getEkbDateString() }, // И здесь тоже ЕКБ время
         unlockedAchievements: [],
         stats: { completedTasks: 0, expiredTasks: 0, totalSpent: 0, epicCompleted: 0, onTimeCompleted: 0 }
       });
@@ -316,8 +349,10 @@ export default function QuestTrackerApp() {
   const normalTasks = useMemo(() => sortTasksList(tasks.filter(t => t.type === 'normal')), [tasks, sortType]);
   const cycleQuests = useMemo(() => sortTasksList(tasks.filter(t => t.type === 'daily' || t.type === 'weekly')), [tasks, sortType]);
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  // ОБНОВЛЕННАЯ СТРОКА: ИСПОЛЬЗУЕМ ВРЕМЯ ЕКБ ДЛЯ ОТРИСОВКИ ОГОНЬКА СТРИКА
+  const todayStr = getEkbDateString();
   const isStreakActiveToday = user.streak.lastDate === todayStr && user.streak.count > 0;
+  
   const visibleEvents = showAllEvents ? events : events.slice(0, 5);
 
   return (
